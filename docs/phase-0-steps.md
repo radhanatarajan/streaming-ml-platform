@@ -15,8 +15,8 @@ A record of each setup step: what was run, why, and how it was checked. Steps ar
 | 8b. Schema Registry and Postgres | Done (2026-10-01) |
 | 8c. Makefile | Done (2026-10-01) |
 | 9a. `ruff`, `pytest` and a first test | Done (2026-10-01) |
-| 9b. CI on GitHub | Not started |
-| 9c. `local_setup` skill, learning note, Phase 0 PR | Not started |
+| 9b. CI on GitHub | Done (2026-10-01) |
+| 9c. `local-setup` skill, learning notes, Phase 0 PR | Done (2026-10-01) |
 
 ---
 
@@ -544,3 +544,104 @@ The test is a smoke test: it is trivial on purpose and proves the test setup wor
 git add pyproject.toml uv.lock tests docs/phase-0-steps.md
 git commit -m "add ruff, pytest and a smoke test"
 ```
+
+## Step 9b — CI on GitHub
+
+**Concept:** **CI** (continuous integration) means that on every push, GitHub starts a fresh Linux machine, downloads the code, and runs the same checks that run locally. It catches things that only work on one laptop.
+
+**What to do**
+
+Added two commands to the `Makefile` (and to its `.PHONY` line):
+
+```make
+lint:
+	uv run ruff check .
+
+test:
+	uv run pytest
+```
+
+Created `.github/workflows/ci.yml`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run pytest
+```
+
+| Line | Meaning |
+|---|---|
+| `on: push: branches: [develop]` | Run on every push to `develop`. |
+| `on: pull_request: branches: [main]` | Run on every pull request into `main`. |
+| `runs-on: ubuntu-latest` | The fresh machine GitHub provides. |
+| `actions/checkout` | Downloads the repository onto that machine. |
+| `astral-sh/setup-uv` | Installs `uv`. |
+| `uv sync --locked` | Installs Python 3.12 and the exact library versions in `uv.lock`; fails if the lock file is out of date. |
+
+CI does not start Kafka or any container. The only test does not need them; a Kafka-backed integration test is planned for Phase 9.
+
+```bash
+make lint
+make test
+git add Makefile .github
+git commit -m "add ci workflow and lint/test make targets"
+git push
+gh run watch
+```
+
+**Check**
+
+- `make lint` prints "All checks passed!"; `make test` prints "1 passed".
+- The GitHub run finishes with success on every step.
+
+**Observed:** all checks passed. First CI run: https://github.com/radhanatarajan/streaming-ml-platform/actions/runs/36932987495
+
+**Commit**
+
+Committed together with step 9c.
+
+## Step 9c — Close out Phase 0
+
+Done by Claude at Radha's request.
+
+| Item | Where |
+|---|---|
+| Learning notes | [phase-0-notes.md](phase-0-notes.md) |
+| `local-setup` skill for Claude Code: how to start, check, stop and wipe the stack | `.claude/skills/local-setup/SKILL.md` |
+| Status line | `CLAUDE.md` and [roadmap.md](roadmap.md) now mark Phase 0 as done |
+| Pull request | `develop` into `main`, titled "Phase 0: scaffold" |
+
+The skill is named `local-setup`, with a hyphen, because skill names allow only lowercase letters, numbers and hyphens.
+
+## Phase 0 result
+
+`make up` starts four containers, and Kafka UI at http://localhost:8080 shows the broker.
+
+| Service | Image | From the Mac | From another container |
+|---|---|---|---|
+| Kafka | `apache/kafka:4.3.1` | `localhost:9092` | `kafka:29092` |
+| Schema Registry | `confluentinc/cp-schema-registry:8.3.2` | `http://localhost:8081` | `http://schema-registry:8081` |
+| Kafka UI | `kafbat/kafka-ui:v1.5.0` | `http://localhost:8080` | — |
+| Postgres | `postgres:17.11` | `localhost:5432` | `postgres:5432` |
+
+| Command | Effect |
+|---|---|
+| `make up` | Start the stack |
+| `make ps` | Show status |
+| `make down` | Delete containers, keep data |
+| `make lint` | Run `ruff` |
+| `make test` | Run `pytest` |
