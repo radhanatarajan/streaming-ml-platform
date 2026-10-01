@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Data and model artifacts (never committed)
+data/
+mlruns/
+mlartifacts/
+adapters/
+*.parquet
+*.csv
+
+# Secrets and local config
+.env
+kaggle.json
+CLAUDE.local.md
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
