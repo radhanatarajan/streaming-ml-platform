@@ -13,8 +13,10 @@ A record of each setup step: what was run, why, and how it was checked. Steps ar
 | 7. Kafka UI and advertised listeners | Done (2026-10-01) |
 | 8a. Permanent storage for Kafka | Done (2026-10-01) |
 | 8b. Schema Registry and Postgres | Done (2026-10-01) |
-| 8c. Makefile | Not started |
-| 9. CI, `local_setup` skill, Phase 0 PR | Not started |
+| 8c. Makefile | Done (2026-10-01) |
+| 9a. `ruff`, `pytest` and a first test | Not started |
+| 9b. CI on GitHub | Not started |
+| 9c. `local_setup` skill, learning note, Phase 0 PR | Not started |
 
 ---
 
@@ -429,4 +431,67 @@ docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server loca
 
 **Observed:** all checks passed. Kafka UI shows 52 partitions: 50 for `__consumer_offsets` (Kafka's own topic for remembering how far each consumer has read), 1 for `_schemas`, 1 for `hello`. Memory in use: Kafka about 350 MB, Kafka UI about 460 MB, Schema Registry about 290 MB, Postgres about 25 MB.
 
+**Commit**
+
+```bash
+git add docker-compose.yml docs/phase-0-steps.md
+git commit -m "add kafka, kafka ui, schema registry and postgres to docker compose"
+```
+
 **Known issue in Kafka UI:** Brokers → broker 1 → **Metrics** tab turns the page blank. Kafka UI's server returns an empty reply for per-broker metrics because we have not set up metrics collection from the broker, and the page does not handle an empty reply. Reload the page to recover. The broker and the other pages are unaffected.
+
+## Step 8c — Makefile
+
+**Concept:** a Makefile gives short names to commands. `make up` is the one command that starts the whole platform.
+
+**What to do**
+
+Create `Makefile` in the project root. The indented lines must start with a tab character, not spaces.
+
+```make
+.PHONY: up down ps
+
+up:
+	docker compose up -d
+
+down:
+	docker compose down
+
+ps:
+	docker compose ps
+```
+
+| Line | Meaning |
+|---|---|
+| `up:` | The name typed after `make`. |
+| The indented line under it | The command that runs. |
+| `.PHONY: up down ps` | Tells `make` these are command names, not files to build. |
+
+```bash
+make -n down     # dry run: prints the command without running it
+make down
+make up
+make ps
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+Two error messages and what they mean:
+
+| Message | Cause |
+|---|---|
+| `No rule to make target 'down'` | The Makefile on disk has no such rule. Here the file was empty because it had not been saved. |
+| `missing separator` | An indented line starts with spaces instead of a tab. |
+
+**Check**
+
+- `make down` removes four containers; `make up` starts four; `make ps` lists four as "Up".
+- The topic list still shows `hello` and `_schemas`.
+
+**Observed:** all checks passed. This is also the roadmap's check for Phase 0: `make up`, then Kafka UI at http://localhost:8080 shows the broker.
+
+**Commit**
+
+```bash
+git add Makefile docs/phase-0-steps.md
+git commit -m "add makefile with up, down and ps"
+```
