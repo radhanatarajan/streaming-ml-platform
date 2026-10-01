@@ -12,7 +12,7 @@ A record of each setup step: what was run, why, and how it was checked. Steps ar
 | 6. Create a topic, send and read one message | Done (2026-10-01) |
 | 7. Kafka UI and advertised listeners | Done (2026-10-01) |
 | 8a. Permanent storage for Kafka | Done (2026-10-01) |
-| 8b. Schema Registry and Postgres | Not started |
+| 8b. Schema Registry and Postgres | Done (2026-10-01) |
 | 8c. Makefile | Not started |
 | 9. CI, `local_setup` skill, Phase 0 PR | Not started |
 
@@ -363,3 +363,70 @@ docker volume ls
 git add docker-compose.yml docs/phase-0-steps.md
 git commit -m "add kafka broker, kafka ui and kafka data volume to docker compose"
 ```
+
+## Step 8b — Schema Registry and Postgres
+
+**Concept:** two supporting services. **Schema Registry** is a small web service that stores the agreed shape of each kind of message (its fields and their types), so a producer cannot silently change a message and break its consumers. It keeps its data in a Kafka topic named `_schemas`. **Postgres** is the database that will hold features, forecasts and enrichment results for the API and the dashboard.
+
+**What to do**
+
+Added to `docker-compose.yml`:
+
+```yaml
+  schema-registry:
+    image: confluentinc/cp-schema-registry:8.3.2
+    container_name: schema-registry
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - kafka
+```
+
+```yaml
+  postgres:
+    image: postgres:17.11
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: streamml
+      POSTGRES_PASSWORD: streamml
+      POSTGRES_DB: streamml
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+```
+
+In `kafka-ui`: one more environment line, `KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081`, and `schema-registry` added to `depends_on`. In the top-level `volumes:` block: `postgres-data:`.
+
+| Line | Meaning |
+|---|---|
+| `SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092` | Schema Registry is a container, so it uses the `DOCKER` listener. |
+| `SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1` | One copy of the `_schemas` topic, because there is one broker. |
+| `KAFKA_CLUSTERS_0_SCHEMAREGISTRY` | Tells Kafka UI where Schema Registry is. |
+| `POSTGRES_USER` / `PASSWORD` / `DB` | Created on first start. The password is in the file because this database only runs on a laptop. |
+
+```bash
+docker compose config --quiet && echo "file is valid"
+docker compose up -d
+docker compose ps
+curl -s http://localhost:8081/subjects
+docker compose exec postgres psql -U streamml -c "select version();"
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+**Check**
+
+- Four containers, all "Up".
+- `curl` prints `[]` (running, no schemas yet).
+- `psql` prints "PostgreSQL 17.11 ...".
+- The topic list includes `_schemas`.
+- Kafka UI's menu includes "Schema Registry".
+
+**Observed:** all checks passed. Kafka UI shows 52 partitions: 50 for `__consumer_offsets` (Kafka's own topic for remembering how far each consumer has read), 1 for `_schemas`, 1 for `hello`. Memory in use: Kafka about 350 MB, Kafka UI about 460 MB, Schema Registry about 290 MB, Postgres about 25 MB.
+
+**Known issue in Kafka UI:** Brokers → broker 1 → **Metrics** tab turns the page blank. Kafka UI's server returns an empty reply for per-broker metrics because we have not set up metrics collection from the broker, and the page does not handle an empty reply. Reload the page to recover. The broker and the other pages are unaffected.
