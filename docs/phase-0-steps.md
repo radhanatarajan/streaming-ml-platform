@@ -14,7 +14,7 @@ A record of each setup step: what was run, why, and how it was checked. Steps ar
 | 8a. Permanent storage for Kafka | Done (2026-10-01) |
 | 8b. Schema Registry and Postgres | Done (2026-10-01) |
 | 8c. Makefile | Done (2026-10-01) |
-| 9a. `ruff`, `pytest` and a first test | Not started |
+| 9a. `ruff`, `pytest` and a first test | Done (2026-10-01) |
 | 9b. CI on GitHub | Not started |
 | 9c. `local_setup` skill, learning note, Phase 0 PR | Not started |
 
@@ -494,4 +494,53 @@ Two error messages and what they mean:
 ```bash
 git add Makefile docs/phase-0-steps.md
 git commit -m "add makefile with up, down and ps"
+```
+
+## Step 9a — `ruff`, `pytest` and a first test
+
+**Concept:** two automatic checks. **`ruff`** is a linter: it reads the code without running it and reports mistakes such as unused imports and undefined names. **`pytest`** runs tests: small functions that call the code and state what the result must be.
+
+**What to do**
+
+```bash
+uv add --dev ruff pytest
+```
+
+Create `tests/test_smoke.py`:
+
+```python
+from streamml import main
+
+
+def test_main_prints_greeting(capsys):
+    main()
+    assert capsys.readouterr().out == "Hello from streamml!\n"
+```
+
+```bash
+uv run ruff check .
+uv run pytest
+```
+
+| Part | Meaning |
+|---|---|
+| `uv add --dev` | Adds the tools as development dependencies: needed to work on the project, not to run it. |
+| `test_` prefix on the file and function | How `pytest` finds tests. |
+| `capsys` | A `pytest` helper that captures what the code prints. |
+| `assert` | The statement that must be true for the test to pass. |
+
+The test is a smoke test: it is trivial on purpose and proves the test setup works before real tests arrive in Phase 1.
+
+**Check**
+
+- `ruff check` prints "All checks passed!".
+- `pytest` prints "1 passed".
+
+**Observed:** both passed, with pytest 9.1.1 on Python 3.12.13.
+
+**Commit**
+
+```bash
+git add pyproject.toml uv.lock tests docs/phase-0-steps.md
+git commit -m "add ruff, pytest and a smoke test"
 ```
