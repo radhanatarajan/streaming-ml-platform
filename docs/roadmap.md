@@ -101,6 +101,7 @@ Each phase is one PR and has a check that must pass before the next starts.
 
 **Phase 0 — Scaffold.** Repo, `uv` project, Compose with Kafka + Schema Registry + Kafka UI + Postgres, Makefile, CI.
 *Check:* `make up`; Kafka UI at localhost:8080 shows the broker.
+*Status:* done 2026-10-01. Step log: [phase-0-steps.md](phase-0-steps.md); notes: [phase-0-notes.md](phase-0-notes.md).
 
 **Phase 1 — Kafka fundamentals.** Topic creation script, Avro schemas, a minimal producer and consumer. Covers partitions, keys, consumer groups, offsets, rebalancing.
 *Check:* two consumers in one group split the partitions between them; killing one triggers a rebalance.
