@@ -105,6 +105,7 @@ Each phase is one PR and has a check that must pass before the next starts.
 
 **Phase 1 — Kafka fundamentals.** Topic creation script, Avro schemas, a minimal producer and consumer. Covers partitions, keys, consumer groups, offsets, rebalancing.
 *Check:* two consumers in one group split the partitions between them; killing one triggers a rebalance.
+*Status:* done 2026-10-05. Step log: [phase-1-steps.md](phase-1-steps.md); notes: [phase-1-notes.md](phase-1-notes.md).
 
 **Phase 2 — Data ingestion.**
 - `make download`, then a profiling script reporting columns, row counts, date range, nulls, and purchases per product.
