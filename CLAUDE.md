@@ -10,7 +10,7 @@ A real-time ML platform on a laptop: e-commerce events are replayed into Kafka, 
 
 Roadmap, architecture, and design decisions: `docs/roadmap.md`. Read it before starting work.
 
-**Status:** Phase 0 (scaffold) complete (2026-10-01). Next: Phase 1 (Kafka fundamentals). Update this line and the roadmap as phases complete.
+**Status:** Phase 1 (Kafka fundamentals) complete (2026-10-05). Next: Phase 2 (data ingestion). Update this line and the roadmap as phases complete.
 
 ---
 

@@ -7,7 +7,9 @@ authors = [
     { name = "radhanatarajan", email = "radhanatarajan@yahoo.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "confluent-kafka[avro]>=2.15.1",
+]
 
 [project.scripts]
 streamml = "streamml:main"

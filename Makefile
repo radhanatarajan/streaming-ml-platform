@@ -14,3 +14,6 @@ lint:
 
 test:
 	uv run pytest
+	
+topics:
+	uv run python -m streamml.topics
