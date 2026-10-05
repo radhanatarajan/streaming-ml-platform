@@ -12,8 +12,9 @@ Learning programs live in `src/streamml/basics/` and run with `uv run python -m 
 | 4. Two consumers in one group; rebalancing | Done (2026-10-05) — Phase 1 check passed |
 | 5. Topic creation script | Done (2026-10-05) |
 | 6. Avro producer with Schema Registry | Done (2026-10-05) |
-| 7. Avro consumer; schema evolution | Not started |
-| 8. Tests, learning notes, Phase 1 PR | Not started |
+| 7. Avro consumer; schema evolution | Done (2026-10-05) |
+| 8a. Tests | Not started |
+| 8b. Learning notes, Phase 1 PR | Not started |
 
 ---
 
@@ -416,7 +417,7 @@ Create `src/streamml/basics/avro_producer.py`:
 
 ```python
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from confluent_kafka import Producer
@@ -441,7 +442,7 @@ def main():
     context = SerializationContext(TOPIC, MessageField.VALUE)
 
     event = {
-        "event_time": datetime.now(timezone.utc),
+        "event_time": datetime.now(UTC),
         "event_type": "view",
         "product_id": 1001,
         "category_id": 2001,
@@ -463,7 +464,7 @@ def main():
     bad_event = {**event, "price": "twelve"}
     try:
         serialize(bad_event, context)
-    except Exception as error:
+    except (TypeError, ValueError) as error:
         print(f"rejected before sending: {error}")
 
 
@@ -493,6 +494,7 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-s
 - The raw message starts `00 00 00 00 01`: one marker byte (0), then the 4-byte schema ID (1). That is how a consumer knows which schema to fetch.
 - Kafka UI decodes the message into fields when the value decoder is "SchemaRegistry". Optional fields show as `{"string": "acme"}`, the way Avro writes a value that may be empty.
 - An `AuthlibDeprecationWarning` printed on startup comes from a dependency. Harmless.
+- The code above is the corrected version. The first version used `timezone.utc` and `except Exception`, which `ruff` 0.16 rejects (UP017, BLE001). The serializer raises `ValueError` for a bad number and `TypeError` for text in an integer field.
 
 **What the serializer does and does not catch** (tested directly):
 
@@ -506,3 +508,114 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-s
 | `brand` left out | Accepted as empty (null), as the schema allows |
 
 The serializer tries to convert text to a decimal number before rejecting it. The topic still receives correct types, but a program sending text by mistake is not warned. The Phase 2 replayer reads a CSV, which is all text, so it must convert each column to its proper type itself.
+
+## Step 7 — Avro consumer and schema changes
+
+**Concept:** `AvroDeserializer` reads the schema ID at the front of each message, fetches that schema from the registry once, and returns a Python dict. The consumer is never given a schema file. Schema Registry checks every new version of a schema against a **compatibility rule**; the default, **BACKWARD**, means a consumer using the new schema must still be able to read messages written with the old one.
+
+**What to do**
+
+Create `src/streamml/basics/avro_consumer.py`:
+
+```python
+from confluent_kafka import Consumer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroDeserializer
+from confluent_kafka.serialization import MessageField, SerializationContext
+
+
+def main():
+    registry = SchemaRegistryClient({"url": "http://localhost:8081"})
+    deserialize = AvroDeserializer(registry)
+    consumer = Consumer(
+        {
+            "bootstrap.servers": "localhost:9092",
+            "group.id": "avro-readers",
+            "auto.offset.reset": "earliest",
+        }
+    )
+    consumer.subscribe(["demo.avro"])
+
+    try:
+        while True:
+            msg = consumer.poll(1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                print(f"error: {msg.error()}")
+                continue
+            event = deserialize(msg.value(), SerializationContext(msg.topic(), MessageField.VALUE))
+            print(f"offset {msg.offset()}: {event}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        consumer.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Create `src/streamml/basics/schema_check.py`:
+
+```python
+import json
+from pathlib import Path
+
+from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
+
+SUBJECT = "demo.avro-value"
+
+
+def changed_schema(change):
+    schema = json.loads(Path("schemas/event.avsc").read_text())
+    change(schema["fields"])
+    return Schema(json.dumps(schema), "AVRO")
+
+
+def add_discount_with_default(fields):
+    fields.append({"name": "discount", "type": "double", "default": 0.0})
+
+
+def add_discount_without_default(fields):
+    fields.append({"name": "discount", "type": "double"})
+
+
+def rename_product_id(fields):
+    for field in fields:
+        if field["name"] == "product_id":
+            field["name"] = "item_id"
+
+
+def main():
+    registry = SchemaRegistryClient({"url": "http://localhost:8081"})
+    print(f"compatibility rule: {registry.get_compatibility()}")
+
+    for change in (add_discount_with_default, add_discount_without_default, rename_product_id):
+        allowed = registry.test_compatibility(SUBJECT, changed_schema(change))
+        print(f"{change.__name__:30} allowed: {allowed}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+`test_compatibility` asks whether a new version would be accepted, without registering it.
+
+```bash
+uv run python -m streamml.basics.avro_consumer
+uv run python -m streamml.basics.schema_check
+```
+
+**Observed**
+
+- The consumer printed the event as a dict with all nine fields. `event_time` came back as a `datetime` in UTC with millisecond precision (`952000` microseconds): `timestamp-millis` stores milliseconds, so anything finer is dropped.
+- Compatibility rule: BACKWARD.
+
+| Change | Allowed | Why |
+|---|---|---|
+| Add `discount` with a default | Yes | Old messages lack it; the default fills in. |
+| Add `discount` without a default | No | Old messages lack it and there is nothing to fill in. |
+| Rename `product_id` to `item_id` | No | Seen as removing `product_id` and adding `item_id` with no default. |
+
+The subject still has only version 1.
