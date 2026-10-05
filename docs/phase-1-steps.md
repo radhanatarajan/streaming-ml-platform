@@ -7,7 +7,7 @@ Learning programs live in `src/streamml/basics/` and run with `uv run python -m 
 | Step | Status |
 |---|---|
 | 1. Python producer | Done (2026-10-05) |
-| 2. Python consumer, consumer groups, committed offsets | Not started |
+| 2. Python consumer, consumer groups, committed offsets | Done (2026-10-05) |
 | 3. Partitions and keys | Not started |
 | 4. Two consumers in one group; rebalancing | Not started |
 | 5. Topic creation script | Not started |
@@ -74,3 +74,72 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-s
 **Observed:** both checks passed, with `confluent-kafka` 2.15.1.
 
 An empty file runs without error in Python. The first attempt printed nothing at all because `producer.py` had not been saved: no output, not even an error, is the sign to check the file on disk.
+
+## Step 2 — Python consumer, consumer groups and committed offsets
+
+**Concept:** every consumer belongs to a **consumer group**, named by `group.id`. Kafka saves, per group and per partition, how far the group has read: the **committed offset**. A consumer that restarts in the same group continues from there instead of starting over. **Lag** is how far behind a group is: the newest offset in the partition minus the committed offset.
+
+**What to do**
+
+Create `src/streamml/basics/consumer.py`:
+
+```python
+from confluent_kafka import Consumer
+
+
+def main():
+    consumer = Consumer(
+        {
+            "bootstrap.servers": "localhost:9092",
+            "group.id": "hello-readers",
+            "auto.offset.reset": "earliest",
+        }
+    )
+    consumer.subscribe(["hello"])
+
+    try:
+        while True:
+            msg = consumer.poll(1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                print(f"error: {msg.error()}")
+                continue
+            print(f"partition {msg.partition()} offset {msg.offset()}: {msg.value().decode()}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        consumer.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+| Part | Meaning |
+|---|---|
+| `"group.id"` | The group this consumer belongs to; Kafka saves progress under this name. |
+| `"auto.offset.reset": "earliest"` | Where to start when the group has no committed offset yet. Ignored after the first commit. |
+| `subscribe(["hello"])` | Which topics to read. Kafka decides which partitions this consumer gets. |
+| `poll(1.0)` | Waits up to 1 second for a message; returns `None` if none arrived. |
+| `close()` | Leaves the group cleanly and saves the final position. |
+
+Offsets are committed automatically every few seconds and on `close()`. Phase 3 switches to manual commits, made only after the data has been written.
+
+Run the consumer and leave it running. In a second terminal, run the producer. Then stop the consumer, start it again, stop it, and describe the group:
+
+```bash
+uv run python -m streamml.basics.consumer          # terminal 1
+uv run python -m streamml.basics.producer          # terminal 2
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group hello-readers
+```
+
+**Check**
+
+- The consumer prints offsets 0 to 2, then 3 to 5 live as the producer sends them.
+- After a restart it prints nothing: it resumes at the committed offset.
+- The group shows `CURRENT-OFFSET 6`, `LOG-END-OFFSET 6`, `LAG 0`.
+
+**Observed:** all as expected. `kafka-consumer-groups.sh` reported "has no active members" because the consumer had been stopped; the committed offset stays saved in Kafka without any consumer running.
+
+Two terminal details: `%` after `^C` is zsh marking output that did not end with a newline, and the `(streamml)` prefix in a new VS Code terminal is this project's own `.venv`, activated automatically. Neither matters.
