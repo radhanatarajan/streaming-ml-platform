@@ -9,7 +9,7 @@ Learning programs live in `src/streamml/basics/` and run with `uv run python -m 
 | 1. Python producer | Done (2026-10-05) |
 | 2. Python consumer, consumer groups, committed offsets | Done (2026-10-05) |
 | 3. Partitions and keys | Done (2026-10-05) |
-| 4. Two consumers in one group; rebalancing | Not started |
+| 4. Two consumers in one group; rebalancing | Done (2026-10-05) — Phase 1 check passed |
 | 5. Topic creation script | Not started |
 | 6. Avro producer with Schema Registry | Not started |
 | 7. Avro consumer; schema evolution | Not started |
@@ -217,3 +217,91 @@ docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server
 - The spread is uneven. With 6 consumers, one would sit idle (partition 2) and one would do three times the work (partition 4). With thousands of products the spread evens out, but a single very popular key still loads one partition more than the rest. This is called a hot key.
 
 The first run failed with "No module named 'streamml.basics.keyed_producer'" because the file had been saved as `keyes_producer.py`. A module name must match the file name exactly.
+
+## Step 4 — Two consumers in one group; rebalancing
+
+This is the roadmap's check for Phase 1.
+
+**Concept:** within one consumer group, each partition is read by exactly one consumer at a time. Running more copies of the same consumer with the same `group.id` splits the partitions between them; that is how a consumer scales. A **rebalance** is Kafka redistributing partitions when a member joins or leaves: members give up their partitions (revoked), receive a new set (assigned), and continue from the group's committed offsets.
+
+**What to do**
+
+Create `src/streamml/basics/group_consumer.py`:
+
+```python
+from confluent_kafka import Consumer
+
+
+def on_assign(consumer, partitions):
+    print(f"assigned partitions: {sorted(p.partition for p in partitions)}")
+
+
+def on_revoke(consumer, partitions):
+    print(f"revoked partitions: {sorted(p.partition for p in partitions)}")
+
+
+def main():
+    consumer = Consumer(
+        {
+            "bootstrap.servers": "localhost:9092",
+            "group.id": "demo-group",
+            "auto.offset.reset": "earliest",
+        }
+    )
+    consumer.subscribe(["demo.events"], on_assign=on_assign, on_revoke=on_revoke)
+
+    try:
+        while True:
+            msg = consumer.poll(1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                print(f"error: {msg.error()}")
+                continue
+            print(
+                f"partition {msg.partition()} offset {msg.offset()} "
+                f"key {msg.key().decode()}: {msg.value().decode()}"
+            )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        consumer.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Run it in three terminals, a few seconds apart:
+
+| # | Terminal | Command or action |
+|---|---|---|
+| a | 1 | `uv run python -m streamml.basics.group_consumer` |
+| b | 2 | `uv run python -m streamml.basics.group_consumer` (a second copy of the same program) |
+| c | 3 | `uv run python -m streamml.basics.keyed_producer` |
+| d | 2 | Ctrl+C |
+| e | 3 | `uv run python -m streamml.basics.keyed_producer` |
+
+| Part | Meaning |
+|---|---|
+| `on_assign` | Called when this consumer receives partitions. |
+| `on_revoke` | Called when partitions are taken away. In Phase 3 this is where a consumer finishes its write and commits. |
+
+Different `group.id`s would not split anything: each group reads every partition independently. That is how the sink and feature consumers will both read all of `events.raw` in Phase 3.
+
+**Observed:**
+
+| Moment | Terminal 1 | Terminal 2 |
+|---|---|---|
+| a | Assigned [0–5]; read all 16 messages | — |
+| b | Revoked [0–5]; assigned [3, 4, 5] | Assigned [0, 1, 2]; no messages (the group had already read them) |
+| c | 10 new messages, all from partitions 3, 4, 5 | 6 new messages, all from partitions 0, 1 |
+| d | Revoked [3, 4, 5]; assigned [0–5] | Ctrl+C: revoked [0, 1, 2], left the group |
+| e | All 16 new messages | — |
+
+No message was read twice by the group and none was skipped. The Phase 1 check passed.
+
+Facts worth keeping:
+
+- **More consumers than partitions does not help.** A 7th consumer on a 6-partition topic gets nothing. The partition count caps how far a group can scale.
+- **Ctrl+C is a clean exit.** `close()` tells Kafka the consumer is leaving, so the rebalance starts at once. A crashed consumer is noticed only after the session timeout (45 seconds by default).
