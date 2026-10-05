@@ -11,7 +11,7 @@ Learning programs live in `src/streamml/basics/` and run with `uv run python -m 
 | 3. Partitions and keys | Done (2026-10-05) |
 | 4. Two consumers in one group; rebalancing | Done (2026-10-05) — Phase 1 check passed |
 | 5. Topic creation script | Done (2026-10-05) |
-| 6. Avro producer with Schema Registry | Not started |
+| 6. Avro producer with Schema Registry | Done (2026-10-05) |
 | 7. Avro consumer; schema evolution | Not started |
 | 8. Tests, learning notes, Phase 1 PR | Not started |
 
@@ -377,3 +377,132 @@ docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server loca
 - `catalog.products` shows `PartitionCount: 1` and `cleanup.policy=compact`.
 
 **Observed:** all checks passed. `events.raw` has 6 partitions.
+
+## Step 6 — Avro producer with Schema Registry
+
+**Concept:** the producer checks each message against an Avro schema and encodes it as compact binary. The first time, it registers the schema with Schema Registry, which returns a schema ID. Every message starts with that ID, so a consumer can fetch the schema and decode the bytes.
+
+The demo sends to a separate topic, `demo.avro`, not `events.raw`: test events in `events.raw` would distort the Phase 3 row counts.
+
+**What to do**
+
+```bash
+uv add "confluent-kafka[avro]"
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic demo.avro --partitions 1 --replication-factor 1
+```
+
+Create `schemas/event.avsc` in the project root (next to `src/`, not inside it):
+
+```json
+{
+  "type": "record",
+  "name": "Event",
+  "namespace": "streamml",
+  "fields": [
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "event_type", "type": {"type": "enum", "name": "EventType", "symbols": ["view", "cart", "remove_from_cart", "purchase"]}},
+    {"name": "product_id", "type": "long"},
+    {"name": "category_id", "type": "long"},
+    {"name": "category_code", "type": ["null", "string"], "default": null},
+    {"name": "brand", "type": ["null", "string"], "default": null},
+    {"name": "price", "type": "double"},
+    {"name": "user_id", "type": "long"},
+    {"name": "user_session", "type": ["null", "string"], "default": null}
+  ]
+}
+```
+
+Create `src/streamml/basics/avro_producer.py`:
+
+```python
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from confluent_kafka import Producer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
+from confluent_kafka.serialization import MessageField, SerializationContext
+
+TOPIC = "demo.avro"
+
+
+def on_delivery(err, msg):
+    if err is not None:
+        print(f"failed: {err}")
+    else:
+        print(f"delivered to {msg.topic()} offset {msg.offset()}: {len(msg.value())} bytes as Avro")
+
+
+def main():
+    registry = SchemaRegistryClient({"url": "http://localhost:8081"})
+    serialize = AvroSerializer(registry, Path("schemas/event.avsc").read_text())
+    producer = Producer({"bootstrap.servers": "localhost:9092"})
+    context = SerializationContext(TOPIC, MessageField.VALUE)
+
+    event = {
+        "event_time": datetime.now(timezone.utc),
+        "event_type": "view",
+        "product_id": 1001,
+        "category_id": 2001,
+        "category_code": "electronics.smartphone",
+        "brand": "acme",
+        "price": 199.99,
+        "user_id": 5001,
+        "user_session": "demo-session-1",
+    }
+    producer.produce(
+        TOPIC,
+        key=str(event["product_id"]),
+        value=serialize(event, context),
+        on_delivery=on_delivery,
+    )
+    producer.flush()
+    print(f"the same event as JSON would be {len(json.dumps(event, default=str))} bytes")
+
+    bad_event = {**event, "price": "twelve"}
+    try:
+        serialize(bad_event, context)
+    except Exception as error:
+        print(f"rejected before sending: {error}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+| Part | Meaning |
+|---|---|
+| `SchemaRegistryClient` | Connects to Schema Registry at `localhost:8081`. |
+| `AvroSerializer(registry, schema)` | Checks a dict against the schema and returns Avro bytes; registers the schema on first use. |
+| `SerializationContext(TOPIC, MessageField.VALUE)` | Topic plus message part; together they give the subject name `demo.avro-value`. |
+
+```bash
+uv run python -m streamml.basics.avro_producer
+curl -s http://localhost:8081/subjects
+curl -s http://localhost:8081/subjects/demo.avro-value/versions/1
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic demo.avro --from-beginning
+```
+
+**Observed**
+
+- The event was 72 bytes as Avro; the same event as JSON is 241 bytes, so about 30%.
+- `price="twelve"` was rejected before sending: "could not convert string to float: 'twelve'". The message does not name the field.
+- Schema Registry holds subject `demo.avro-value`, version 1, schema ID 1.
+- The console consumer printed binary with a few readable strings (`electronics.smartphone`, `acme`, `demo-session-1`): Avro stores text as-is and numbers in binary.
+- The raw message starts `00 00 00 00 01`: one marker byte (0), then the 4-byte schema ID (1). That is how a consumer knows which schema to fetch.
+- Kafka UI decodes the message into fields when the value decoder is "SchemaRegistry". Optional fields show as `{"string": "acme"}`, the way Avro writes a value that may be empty.
+- An `AuthlibDeprecationWarning` printed on startup comes from a dependency. Harmless.
+
+**What the serializer does and does not catch** (tested directly):
+
+| Value | Result |
+|---|---|
+| `price="twelve"` | Rejected |
+| `price="12.50"` (number as text) | Accepted, converted to 12.5 |
+| `price=12` | Accepted as 12.0 |
+| `product_id="42"` | Rejected: "an integer is required on field product_id" |
+| `event_type="click"` | Rejected: not one of the allowed values |
+| `brand` left out | Accepted as empty (null), as the schema allows |
+
+The serializer tries to convert text to a decimal number before rejecting it. The topic still receives correct types, but a program sending text by mistake is not warned. The Phase 2 replayer reads a CSV, which is all text, so it must convert each column to its proper type itself.
