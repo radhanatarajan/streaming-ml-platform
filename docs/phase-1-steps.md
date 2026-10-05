@@ -10,7 +10,7 @@ Learning programs live in `src/streamml/basics/` and run with `uv run python -m 
 | 2. Python consumer, consumer groups, committed offsets | Done (2026-10-05) |
 | 3. Partitions and keys | Done (2026-10-05) |
 | 4. Two consumers in one group; rebalancing | Done (2026-10-05) — Phase 1 check passed |
-| 5. Topic creation script | Not started |
+| 5. Topic creation script | Done (2026-10-05) |
 | 6. Avro producer with Schema Registry | Not started |
 | 7. Avro consumer; schema evolution | Not started |
 | 8. Tests, learning notes, Phase 1 PR | Not started |
@@ -301,7 +301,79 @@ Different `group.id`s would not split anything: each group reads every partition
 
 No message was read twice by the group and none was skipped. The Phase 1 check passed.
 
+In plain terms: think of terminals 1 and 2 as Reader A and Reader B, two copies of the same program on the same team (`demo-group`), and terminal 3 as the Sender. Kafka's rule is that each partition goes to exactly one member of a team, so it shares the 6 partitions between A and B, and gives them all back to A when B leaves. In the project, A and B will be copies of the sink consumer and the Sender will be the replayer. Kafka UI → Consumers → `demo-group` shows each member and the partitions it owns.
+
 Facts worth keeping:
 
 - **More consumers than partitions does not help.** A 7th consumer on a 6-partition topic gets nothing. The partition count caps how far a group can scale.
 - **Ctrl+C is a clean exit.** `close()` tells Kafka the consumer is leaving, so the rebalance starts at once. A crashed consumer is noticed only after the session timeout (45 seconds by default).
+
+## Step 5 — Topic creation script
+
+**Concept:** topic settings belong in code, so `make topics` creates the same topics with the same settings on any machine. The script skips topics that already exist, so it is safe to run again: it is **idempotent**. **Compaction** (`cleanup.policy=compact`) keeps the latest message for each key instead of deleting messages by age, which turns `catalog.products` into a table of the current details of every product.
+
+**What to do**
+
+Create `src/streamml/topics.py`:
+
+```python
+from confluent_kafka.admin import AdminClient, NewTopic
+
+TOPICS = [
+    NewTopic("events.raw", num_partitions=6, replication_factor=1),
+    NewTopic("events.dlq", num_partitions=1, replication_factor=1),
+    NewTopic(
+        "catalog.products",
+        num_partitions=1,
+        replication_factor=1,
+        config={"cleanup.policy": "compact"},
+    ),
+    NewTopic("catalog.enriched", num_partitions=1, replication_factor=1),
+    NewTopic("predictions", num_partitions=1, replication_factor=1),
+]
+
+
+def main():
+    admin = AdminClient({"bootstrap.servers": "localhost:9092"})
+    existing = admin.list_topics(timeout=10).topics
+
+    for topic in TOPICS:
+        if topic.topic in existing:
+            print(f"exists:  {topic.topic}")
+            continue
+        admin.create_topics([topic])[topic.topic].result()
+        print(f"created: {topic.topic}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Add to the `Makefile`:
+
+```make
+topics:
+	uv run python -m streamml.topics
+```
+
+| Part | Meaning |
+|---|---|
+| `AdminClient` | The client for managing Kafka (topics, settings), not for sending or reading messages. |
+| `list_topics(...).topics` | The topics that exist now. |
+| `create_topics([...])[name].result()` | Creates the topic and waits for the answer; raises an error if creation fails. |
+| `config={"cleanup.policy": "compact"}` | Turns on compaction for that topic. |
+
+Partition counts: only `events.raw` carries high volume, so only it has 6 partitions. The other topics carry one message per product or per failure, so 1 is enough.
+
+```bash
+make topics
+make topics
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic catalog.products
+```
+
+**Check**
+
+- The first run prints `created:` for all five topics; the second prints `exists:` for all five.
+- `catalog.products` shows `PartitionCount: 1` and `cleanup.policy=compact`.
+
+**Observed:** all checks passed. `events.raw` has 6 partitions.
