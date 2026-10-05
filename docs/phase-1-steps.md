@@ -13,7 +13,7 @@ Learning programs live in `src/streamml/basics/` and run with `uv run python -m 
 | 5. Topic creation script | Done (2026-10-05) |
 | 6. Avro producer with Schema Registry | Done (2026-10-05) |
 | 7. Avro consumer; schema evolution | Done (2026-10-05) |
-| 8a. Tests | Not started |
+| 8a. Tests | Done (2026-10-05) |
 | 8b. Learning notes, Phase 1 PR | Not started |
 
 ---
@@ -619,3 +619,91 @@ uv run python -m streamml.basics.schema_check
 | Rename `product_id` to `item_id` | No | Seen as removing `product_id` and adding `item_id` with no default. |
 
 The subject still has only version 1.
+
+## Step 8a — Tests
+
+**Concept:** CI has no Kafka, so the tests check what can be checked without it: the topic settings in `topics.py`, and that the event schema accepts and rejects the right things. `fastavro` (the Avro library inside `confluent-kafka`) encodes and decodes without Schema Registry.
+
+**What to do**
+
+`tests/test_topics.py`:
+
+```python
+from streamml.topics import TOPICS
+
+
+def topic(name):
+    return next(t for t in TOPICS if t.topic == name)
+
+
+def test_events_raw_has_six_partitions():
+    assert topic("events.raw").num_partitions == 6
+
+
+def test_catalog_products_is_compacted():
+    assert topic("catalog.products").config["cleanup.policy"] == "compact"
+```
+
+`tests/test_event_schema.py`:
+
+```python
+import io
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+import fastavro
+import pytest
+
+SCHEMA_PATH = Path(__file__).parent.parent / "schemas" / "event.avsc"
+SCHEMA = fastavro.parse_schema(json.loads(SCHEMA_PATH.read_text()))
+
+EVENT = {
+    "event_time": datetime(2026, 10, 1, 12, 0, tzinfo=UTC),
+    "event_type": "purchase",
+    "product_id": 1001,
+    "category_id": 2001,
+    "category_code": "electronics.smartphone",
+    "brand": "acme",
+    "price": 199.99,
+    "user_id": 5001,
+    "user_session": "session-1",
+}
+
+
+def round_trip(event):
+    buffer = io.BytesIO()
+    fastavro.schemaless_writer(buffer, SCHEMA, event)
+    buffer.seek(0)
+    return fastavro.schemaless_reader(buffer, SCHEMA)
+
+
+def test_event_round_trips():
+    assert round_trip(EVENT) == EVENT
+
+
+def test_missing_brand_is_allowed():
+    assert round_trip({**EVENT, "brand": None})["brand"] is None
+
+
+def test_unknown_event_type_is_rejected():
+    with pytest.raises(ValueError):
+        round_trip({**EVENT, "event_type": "click"})
+```
+
+| Test | What it protects |
+|---|---|
+| `test_events_raw_has_six_partitions` | The partition count, which caps how many consumers can share `events.raw` |
+| `test_catalog_products_is_compacted` | Compaction on the catalog topic |
+| `test_event_round_trips` | Encoding then decoding gives back the same event |
+| `test_missing_brand_is_allowed` | Products without a brand are accepted |
+| `test_unknown_event_type_is_rejected` | Only the four event types are allowed |
+
+```bash
+make lint
+make test
+```
+
+**Check:** `All checks passed!` and `6 passed`.
+
+**Observed:** both passed. The first commit of this step went in without the test files and without the lint fix to `avro_producer.py`, because those edits had not been saved; `make test` reporting "collected 1 item" was the sign. Fixed in a second commit.
