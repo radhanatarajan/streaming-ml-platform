@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from confluent_kafka import Producer
@@ -24,7 +24,7 @@ def main():
     context = SerializationContext(TOPIC, MessageField.VALUE)
 
     event = {
-        "event_time": datetime.now(timezone.utc),
+        "event_time": datetime.now(UTC),
         "event_type": "view",
         "product_id": 1001,
         "category_id": 2001,
@@ -46,7 +46,7 @@ def main():
     bad_event = {**event, "price": "twelve"}
     try:
         serialize(bad_event, context)
-    except Exception as error:
+    except (TypeError, ValueError) as error:
         print(f"rejected before sending: {error}")
 
 
