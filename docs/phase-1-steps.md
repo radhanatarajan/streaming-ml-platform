@@ -8,7 +8,7 @@ Learning programs live in `src/streamml/basics/` and run with `uv run python -m 
 |---|---|
 | 1. Python producer | Done (2026-10-05) |
 | 2. Python consumer, consumer groups, committed offsets | Done (2026-10-05) |
-| 3. Partitions and keys | Not started |
+| 3. Partitions and keys | Done (2026-10-05) |
 | 4. Two consumers in one group; rebalancing | Not started |
 | 5. Topic creation script | Not started |
 | 6. Avro producer with Schema Registry | Not started |
@@ -143,3 +143,77 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
 **Observed:** all as expected. `kafka-consumer-groups.sh` reported "has no active members" because the consumer had been stopped; the committed offset stays saved in Kafka without any consumer running.
 
 Two terminal details: `%` after `^C` is zsh marking output that did not end with a newline, and the `(streamml)` prefix in a new VS Code terminal is this project's own `.venv`, activated automatically. Neither matters.
+
+## Step 3 — Partitions and keys
+
+**Concept:** a **partition** is one slice of a topic: its own ordered log with its own offsets. Partitions let several consumers read one topic at the same time. A **key** decides the partition: Kafka hashes the key, so the same key always lands in the same partition. Order is guaranteed only within a partition, so the key chooses what stays in order. In `events.raw` the key is `product_id`, which keeps each product's events in order.
+
+**What to do**
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic demo.events --partitions 6 --replication-factor 1
+```
+
+Kafka warns that topic names with a period or underscore can collide in metric names. Expected and harmless.
+
+Create `src/streamml/basics/keyed_producer.py`:
+
+```python
+from confluent_kafka import Producer
+
+PRODUCTS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"]
+
+
+def on_delivery(err, msg):
+    if err is not None:
+        print(f"failed: {err}")
+    else:
+        print(f"key {msg.key().decode()} -> partition {msg.partition()} offset {msg.offset()}")
+
+
+def main():
+    producer = Producer({"bootstrap.servers": "localhost:9092"})
+
+    for round_number in range(2):
+        for product in PRODUCTS:
+            producer.produce(
+                "demo.events",
+                key=product,
+                value=f"event {round_number} for {product}",
+                on_delivery=on_delivery,
+            )
+
+    producer.flush()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+```bash
+uv run python -m streamml.basics.keyed_producer
+docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic demo.events
+```
+
+**Check**
+
+- Each key goes to the same partition in both rounds.
+- The per-partition counts add up to 16.
+
+**Observed:**
+
+| Partition | Keys | Messages |
+|---|---|---|
+| 0 | p6 | 2 |
+| 1 | p1, p3 | 4 |
+| 2 | none | 0 |
+| 3 | p8 | 2 |
+| 4 | p4, p5, p7 | 6 |
+| 5 | p2 | 2 |
+
+- Every key stayed in one partition, and the total is 16.
+- Within partition 1 the order is p1, p3, p1, p3: the order they were sent.
+- Delivery reports arrived grouped by partition, not in send order, because the client sends one batch per partition.
+- The spread is uneven. With 6 consumers, one would sit idle (partition 2) and one would do three times the work (partition 4). With thousands of products the spread evens out, but a single very popular key still loads one partition more than the rest. This is called a hot key.
+
+The first run failed with "No module named 'streamml.basics.keyed_producer'" because the file had been saved as `keyes_producer.py`. A module name must match the file name exactly.
